@@ -10,7 +10,6 @@ import time
 import imageio_ffmpeg
 import librosa
 import streamlit as st
-import streamlit.components.v1 as components
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -27,7 +26,7 @@ SAMPLE_RATE = 16000
 TOTAL_STEPS = 6
 BAR_DELAYS = [0, 0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1, 0]
 
-# ---------- Styling (Dark studio theme + custom buttons) ----------
+# ---------- Styling ----------
 st.markdown(
     """
 <style>
@@ -311,326 +310,19 @@ def transcribe(speech, tracker):
     return " ".join(t for t in texts if t)
 
 
-# ---------- Custom Live Visual Waveform Recorder Component ----------
-def render_waveform_recorder():
-    """HTML5 canvas live scrolling waveform studio component."""
-    html_code = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-          background-color: #1a1c23;
-          color: #e0e0e0;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          padding: 10px;
-          border-radius: 16px;
-          border: 1px solid rgba(255,75,75,0.25);
-        }
-        .canvas-container {
-          position: relative;
-          width: 100%;
-          height: 160px;
-          background: #121318;
-          border-radius: 12px;
-          overflow: hidden;
-          border: 1px solid #2d2f39;
-        }
-        canvas {
-          width: 100%;
-          height: 100%;
-          display: block;
-        }
-        .time-ruler {
-          position: absolute;
-          top: 4px;
-          width: 100%;
-          display: flex;
-          justify-content: space-between;
-          padding: 0 15px;
-          font-family: monospace;
-          font-size: 11px;
-          color: #717585;
-          pointer-events: none;
-        }
-        .timeline-center-line {
-          position: absolute;
-          top: 50%;
-          left: 0;
-          width: 100%;
-          height: 1px;
-          background: rgba(255, 255, 255, 0.08);
-          pointer-events: none;
-        }
-        .playhead-line {
-          position: absolute;
-          top: 0;
-          left: 45%;
-          width: 2px;
-          height: 100%;
-          background: #ff4b4b;
-          box-shadow: 0 0 8px rgba(255, 75, 75, 0.8);
-          pointer-events: none;
-        }
-        .controls {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 24px;
-          margin-top: 14px;
-          width: 100%;
-        }
-        .btn {
-          width: 48px;
-          height: 48px;
-          border-radius: 50%;
-          border: none;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: all 0.2s ease;
-          outline: none;
-        }
-        .btn-rec {
-          background: #282a36;
-          border: 2px solid #ff4b4b;
-        }
-        .btn-rec:hover {
-          transform: scale(1.08);
-          box-shadow: 0 0 15px rgba(255, 75, 75, 0.4);
-        }
-        .rec-dot {
-          width: 16px;
-          height: 16px;
-          background: #ff4b4b;
-          border-radius: 50%;
-        }
-        .btn-stop {
-          background: #282a36;
-          border: 2px solid #ffffff;
-        }
-        .btn-stop:hover {
-          transform: scale(1.08);
-        }
-        .stop-square {
-          width: 14px;
-          height: 14px;
-          background: #ffffff;
-          border-radius: 3px;
-        }
-        .timer {
-          font-family: monospace;
-          font-size: 1.5rem;
-          font-weight: 700;
-          color: #ffffff;
-          letter-spacing: 1px;
-          min-width: 110px;
-          text-align: center;
-        }
-        .recording .rec-dot {
-          animation: pulse-dot 1s infinite alternate;
-        }
-        @keyframes pulse-dot {
-          from { transform: scale(0.9); opacity: 0.7; }
-          to { transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px #ff4b4b; }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="canvas-container">
-        <div class="time-ruler">
-          <span>00:00.00</span>
-          <span>00:01.60</span>
-          <span>00:03.20</span>
-          <span>00:04.80</span>
-          <span>00:06.40</span>
-        </div>
-        <div class="timeline-center-line"></div>
-        <canvas id="waveform"></canvas>
-        <div class="playhead-line"></div>
-      </div>
-
-      <div class="controls">
-        <button id="btnStop" class="btn btn-stop" style="opacity: 0.4; cursor: not-allowed;" disabled>
-          <div class="stop-square"></div>
-        </button>
-        <div id="timer" class="timer">00:00.00</div>
-        <button id="btnRec" class="btn btn-rec">
-          <div class="rec-dot"></div>
-        </button>
-      </div>
-
-      <script>
-        let mediaRecorder;
-        let audioChunks = [];
-        let audioCtx, analyser, dataArray, source;
-        let isRecording = false;
-        let startTime;
-        let timerInterval;
-        let animFrame;
-
-        const canvas = document.getElementById('waveform');
-        const ctx = canvas.getContext('2d');
-        const timerEl = document.getElementById('timer');
-        const btnRec = document.getElementById('btnRec');
-        const btnStop = document.getElementById('btnStop');
-
-        let waveHistory = [];
-        const PLAYHEAD_X_RATIO = 0.45;
-
-        function resizeCanvas() {
-          canvas.width = canvas.offsetWidth;
-          canvas.height = canvas.offsetHeight;
-        }
-        window.addEventListener('resize', resizeCanvas);
-        resizeCanvas();
-
-        function drawWaveform() {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-          const centerY = canvas.height / 2;
-          const playheadX = canvas.width * PLAYHEAD_X_RATIO;
-          const barWidth = 3;
-          const gap = 2;
-          const step = barWidth + gap;
-
-          if (isRecording && analyser) {
-            analyser.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
-            }
-            let avg = sum / dataArray.length;
-            let normAmp = Math.min(1.0, Math.max(0.04, (avg / 128.0) * 1.5));
-            waveHistory.push(normAmp);
-          }
-
-          for (let i = 0; i < waveHistory.length; i++) {
-            let x = playheadX - (waveHistory.length - 1 - i) * step;
-            if (x < -10) continue;
-
-            let height = waveHistory[i] * (canvas.height * 0.7);
-            ctx.fillStyle = "#8a8d9b";
-            ctx.fillRect(x, centerY - height / 2, barWidth, height);
-          }
-
-          animFrame = requestAnimationFrame(drawWaveform);
-        }
-
-        function updateTimer() {
-          const now = Date.now();
-          const diff = new Date(now - startTime);
-          const mins = String(diff.getUTCMinutes()).padStart(2, '0');
-          const secs = String(diff.getUTCSeconds()).padStart(2, '0');
-          const ms = String(Math.floor(diff.getUTCMilliseconds() / 10)).padStart(2, '0');
-          timerEl.textContent = `${mins}:${secs}.${ms}`;
-        }
-
-        btnRec.addEventListener('click', async () => {
-          if (isRecording) return;
-
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioCtx.createAnalyser();
-            analyser.fftSize = 128;
-            dataArray = new Uint8Array(analyser.frequencyBinCount);
-            
-            source = audioCtx.createMediaStreamSource(stream);
-            source.connect(analyser);
-
-            mediaRecorder = new MediaRecorder(stream);
-            audioChunks = [];
-            waveHistory = [];
-
-            mediaRecorder.ondataavailable = (e) => {
-              if (e.data.size > 0) audioChunks.push(e.data);
-            };
-
-            mediaRecorder.onstop = async () => {
-              const blob = new Blob(audioChunks, { type: 'audio/wav' });
-              const reader = new FileReader();
-              reader.readAsDataURL(blob);
-              reader.onloadend = () => {
-                const base64Audio = reader.result;
-                window.parent.postMessage({
-                  type: "streamlit:setComponentValue",
-                  value: base64Audio
-                }, "*");
-              };
-              stream.getTracks().forEach(track => track.stop());
-            };
-
-            mediaRecorder.start(100);
-            isRecording = true;
-            startTime = Date.now();
-            timerInterval = setInterval(updateTimer, 30);
-
-            btnRec.classList.add('recording');
-            btnRec.style.opacity = '0.4';
-            btnRec.disabled = true;
-
-            btnStop.style.opacity = '1';
-            btnStop.disabled = false;
-            btnStop.style.cursor = 'pointer';
-
-            drawWaveform();
-
-          } catch (err) {
-            alert('Microphone access denied or not supported.');
-            console.error(err);
-          }
-        });
-
-        btnStop.addEventListener('click', () => {
-          if (!isRecording) return;
-          isRecording = false;
-          clearInterval(timerInterval);
-          cancelAnimationFrame(animFrame);
-          mediaRecorder.stop();
-
-          btnRec.classList.remove('recording');
-          btnRec.style.opacity = '1';
-          btnRec.disabled = false;
-
-          btnStop.style.opacity = '0.4';
-          btnStop.disabled = true;
-          btnStop.style.cursor = 'not-allowed';
-        });
-
-        drawWaveform();
-      </script>
-    </body>
-    </html>
-    """
-    return components.html(html_code, height=255)
-
-
-# ---------- Main UI Layout ----------
+# ---------- Main UI Layout (Tabs for Live Recording vs File Upload) ----------
 tab_record, tab_upload = st.tabs(["🎙️ Record Live Audio", "📁 Upload File"])
 
 audio_bytes = None
 file_key = None
 
 with tab_record:
-    st.caption("Click the red record button below to speak directly from your browser.")
-    recorded_audio_data = render_waveform_recorder()
-
-    # Safely parse component output only if it's a valid string containing data
-    if isinstance(recorded_audio_data, str) and "," in recorded_audio_data:
-        import base64
-        try:
-            header, encoded = recorded_audio_data.split(",", 1)
-            audio_bytes = base64.b64decode(encoded)
-            st.audio(audio_bytes, format="audio/wav")
-            file_key = f"live_recording_{len(audio_bytes)}"
-        except Exception as e:
-            st.error(f"Error parsing live recording: {e}")
+    st.caption("Click the microphone button to record your voice directly. Once stopped, you can play it back.")
+    recorded_file = st.audio_input("Record Nuer Voice")
+    
+    if recorded_file is not None:
+        audio_bytes = recorded_file.read()
+        file_key = f"live_recording_{len(audio_bytes)}"
 
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -639,7 +331,6 @@ with tab_upload:
     )
     if uploaded_file is not None:
         audio_bytes = uploaded_file.read()
-        st.audio(audio_bytes)
         file_key = f"{uploaded_file.name}-{len(audio_bytes)}"
 
 # Transcribe action trigger
