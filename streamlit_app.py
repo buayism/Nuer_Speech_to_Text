@@ -1,6 +1,11 @@
+import os
+import tempfile
+
 import librosa
 import streamlit as st
 import torch
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
 from transformers import AutoProcessor, Wav2Vec2ForCTC
 
 # App Configuration & Title
@@ -8,36 +13,41 @@ st.set_page_config(page_title="Nuer MMS Speech-to-Text", page_icon="🎙️")
 
 st.title("🎙️ Nuer MMS Speech-to-Text")
 st.write(
-    "Upload a Nuer audio file or record your voice to transcribe it using your"
-    " fine-tuned MMS adapter model (`buayism/nuer_mms_adapter`)."
+    "Upload a Nuer audio file to transcribe it using your fine-tuned MMS"
+    " adapter model (`buayism/nuer_mms_adapter`)."
 )
+
+BASE_MODEL_ID = "facebook/mms-1b-all"
+ADAPTER_REPO = "buayism/nuer_mms_adapter"
+ADAPTER_FILE = "adapter.nus.safetensors"
 
 
 # Load base model and adapter with caching so it only loads once
 @st.cache_resource
 def load_model():
-  # 1. Use the official base MMS model architecture
-  base_model_id = (
-      "facebook/mms-1b-all"  # or "facebook/mms-300m" depending on what you trained
-  )
-  adapter_repo = "buayism/nuer_mms_adapter"
+    # 1. Processor/tokenizer with your Nuer vocab
+    processor = AutoProcessor.from_pretrained(ADAPTER_REPO)
 
-  st.info("Loading base MMS model and processor...")
-  processor = AutoProcessor.from_pretrained(adapter_repo)
-  model = Wav2Vec2ForCTC.from_pretrained(base_model_id)
+    # 2. Base MMS model, resized to your Nuer vocab size
+    model = Wav2Vec2ForCTC.from_pretrained(
+        BASE_MODEL_ID,
+        vocab_size=len(processor.tokenizer),
+        pad_token_id=processor.tokenizer.pad_token_id,
+        ignore_mismatched_sizes=True,
+    )
 
-  # 2. Load your custom Nuer adapter weights from your Hugging Face repo
-  st.info("Loading Nuer adapter weights...")
-  model.load_adapter(adapter_repo)
+    # 3. Load your trained adapter layers + lm_head from your HF repo
+    adapter_path = hf_hub_download(ADAPTER_REPO, ADAPTER_FILE)
+    state_dict = load_file(adapter_path)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    print("Unexpected adapter keys:", unexpected)  # should be empty
 
-  # 3. Set the active adapter language/token
-  model.active_adapter = "nus"
-
-  return processor, model
+    model.eval()
+    return processor, model
 
 
 with st.spinner("Initializing Nuer Speech-to-Text pipeline... Please wait."):
-  processor, model = load_model()
+    processor, model = load_model()
 
 # File uploader for audio files
 audio_file = st.file_uploader(
@@ -45,30 +55,34 @@ audio_file = st.file_uploader(
 )
 
 if audio_file is not None:
-  st.audio(audio_file)
+    st.audio(audio_file)
 
-  if st.button("Transcribe Audio", type="primary"):
-    with st.spinner("Processing speech-to-text transcription..."):
-      # Save the uploaded file locally temporarily
-      audio_path = "temp_audio.wav"
-      with open(audio_path, "wb") as f:
-        f.write(audio_file.getbuffer())
+    if st.button("Transcribe Audio", type="primary"):
+        with st.spinner("Processing speech-to-text transcription..."):
+            # Save the upload temporarily, keeping its real file extension
+            suffix = os.path.splitext(audio_file.name)[1] or ".wav"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(audio_file.getbuffer())
+                audio_path = tmp.name
 
-      # Load and resample audio to 16kHz (required by MMS model)
-      speech_array, sampling_rate = librosa.load(audio_path, sr=16000)
+            try:
+                # Load and resample audio to 16kHz (required by MMS model)
+                speech_array, _ = librosa.load(audio_path, sr=16000)
+            finally:
+                os.remove(audio_path)
 
-      # Tokenize input values
-      inputs = processor(
-          speech_array, sampling_rate=16000, return_tensors="pt", padding=True
-      )
+            # Prepare model inputs
+            inputs = processor(
+                speech_array, sampling_rate=16000, return_tensors="pt", padding=True
+            )
 
-      # Run inference without gradient calculations
-      with torch.no_grad():
-        logits = model(inputs.input_values).logits
+            # Run inference without gradient calculations
+            with torch.no_grad():
+                logits = model(inputs.input_values).logits
 
-      predicted_ids = torch.argmax(logits, dim=-1)
-      transcription = processor.batch_decode(predicted_ids)[0]
+            predicted_ids = torch.argmax(logits, dim=-1)
+            transcription = processor.batch_decode(predicted_ids)[0]
 
-      # Display the final transcription
-      st.success("Transcription Complete:")
-      st.markdown(f"### {transcription}")
+            # Display the final transcription
+            st.success("Transcription Complete:")
+            st.markdown(f"### {transcription}")
