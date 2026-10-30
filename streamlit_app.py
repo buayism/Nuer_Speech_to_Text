@@ -1,4 +1,5 @@
 import html
+import io
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import time
 import imageio_ffmpeg
 import librosa
 import streamlit as st
+import streamlit.components.v1 as components
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -25,11 +27,11 @@ SAMPLE_RATE = 16000
 TOTAL_STEPS = 6
 BAR_DELAYS = [0, 0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1, 0]
 
-# ---------- Styling (same palette: dark bg, red #ff4b4b, green) ----------
+# ---------- Styling (Dark studio theme + custom buttons) ----------
 st.markdown(
     """
 <style>
-.block-container { padding-top: 2rem; max-width: 760px; }
+.block-container { padding-top: 1.5rem; max-width: 780px; }
 
 @keyframes fadeUp { from {opacity:0; transform: translateY(14px);} to {opacity:1; transform:none;} }
 @keyframes pulse {
@@ -39,21 +41,21 @@ st.markdown(
 @keyframes bounce { 0%,100% { height: 8px; } 50% { height: 44px; } }
 
 .hero { text-align:center; animation: fadeUp .6s ease both; }
-.hero .mic { font-size: 3.4rem; display:inline-block; animation: pulse 2.4s ease-in-out infinite; }
+.hero .mic { font-size: 3.2rem; display:inline-block; animation: pulse 2.4s ease-in-out infinite; }
 .hero .title {
-  font-size: 2.5rem; font-weight: 800; line-height: 1.15; margin: .3rem 0 .4rem;
+  font-size: 2.4rem; font-weight: 800; line-height: 1.15; margin: .2rem 0 .4rem;
   background: linear-gradient(90deg, #ff4b4b, #ffffff);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
 }
-.hero .sub { opacity: .8; margin-bottom: .4rem; }
+.hero .sub { opacity: .8; margin-bottom: .8rem; font-size: 0.95rem; }
 
-.steps { display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin: 1rem 0 1.6rem; animation: fadeUp .8s ease both; }
-.step { padding:.4rem .95rem; border-radius:999px; background:#262730; font-size:.85rem; border:1px solid rgba(255,75,75,.35); }
+.steps { display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin: .5rem 0 1.2rem; animation: fadeUp .8s ease both; }
+.step { padding:.35rem .85rem; border-radius:999px; background:#262730; font-size:.82rem; border:1px solid rgba(255,75,75,.35); }
 .step b { color:#ff4b4b; margin-right:.3rem; }
 
 [data-testid="stFileUploader"] section {
   border: 2px dashed rgba(255,75,75,.55); border-radius: 16px; background: #262730;
-  padding: 1.4rem; transition: all .25s ease;
+  padding: 1.2rem; transition: all .25s ease;
 }
 [data-testid="stFileUploader"] section:hover {
   border-color: #ff4b4b; box-shadow: 0 0 24px rgba(255,75,75,.25); transform: translateY(-2px);
@@ -91,7 +93,6 @@ div.stButton > button:hover, button[data-testid="stBaseButton-primary"]:hover {
   font-size: 1.8rem; font-weight: 700; line-height: 1.5; margin-top:.4rem;
 }
 
-/* Copy box uses the same Times New Roman style */
 [data-testid="stCode"] pre, [data-testid="stCode"] code {
   font-family: "Times New Roman", Times, "Liberation Serif", serif !important;
   font-size: 1.15rem !important;
@@ -114,16 +115,16 @@ st.markdown(
 <div class="sub">Turn spoken Nuer into text, powered by your fine-tuned MMS adapter.</div>
 </div>
 <div class="steps">
-<div class="step"><b>1</b>Upload audio</div>
-<div class="step"><b>2</b>Click transcribe</div>
-<div class="step"><b>3</b>Copy or download</div>
+<div class="step"><b>1</b> Record or Upload</div>
+<div class="step"><b>2</b> Click Transcribe</div>
+<div class="step"><b>3</b> Copy or Download</div>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
 
-# ---------- Model ----------
+# ---------- Model Loading ----------
 @st.cache_resource
 def load_model():
     processor = AutoProcessor.from_pretrained(ADAPTER_REPO)
@@ -138,19 +139,17 @@ def load_model():
     adapter_path = hf_hub_download(ADAPTER_REPO, ADAPTER_FILE)
     state_dict = load_file(adapter_path)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print("Unexpected adapter keys:", unexpected)  # should be empty
 
     model.eval()
     return processor, model
 
 
-with st.spinner("Warming up the Nuer model (the first load can take a minute)..."):
+with st.spinner("Warming up the Nuer model..."):
     processor, model = load_model()
 
 
-# ---------- Live, honest progress display ----------
+# ---------- Audio & Model Processing ----------
 def loader_html(step, title, note, elapsed, progress=None):
-    # Negative delays keep the bar animation in phase when the card re-renders
     phase = elapsed % 1.0
     bars = "".join(
         f'<span style="animation-delay:{d - phase:.2f}s"></span>' for d in BAR_DELAYS
@@ -170,8 +169,6 @@ def loader_html(step, title, note, elapsed, progress=None):
 
 
 class Tracker:
-    """Writes the current, real pipeline stage into one placeholder."""
-
     def __init__(self, placeholder):
         self.placeholder = placeholder
         self.start = time.time()
@@ -183,13 +180,11 @@ class Tracker:
         )
 
 
-# ---------- Audio + model helpers ----------
-def load_audio_16k(uploaded_file, tracker):
-    """Convert any uploaded audio to 16kHz mono WAV with ffmpeg, then load it."""
-    tracker.show(1, "Reading your audio file…", "Saving your upload so it can be processed.")
-    suffix = os.path.splitext(uploaded_file.name)[1] or ".audio"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
-        src.write(uploaded_file.getbuffer())
+def load_audio_16k(audio_bytes, tracker):
+    """Convert audio bytes to 16kHz mono WAV using ffmpeg."""
+    tracker.show(1, "Reading audio input…", "Preparing recorded audio for processing.")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as src:
+        src.write(audio_bytes)
         src_path = src.name
     out_path = src_path + "_16k.wav"
 
@@ -198,8 +193,8 @@ def load_audio_16k(uploaded_file, tracker):
     try:
         tracker.show(
             2,
-            "Converting your audio…",
-            "Converting to 16 kHz mono, the format the model was trained to hear.",
+            "Converting audio format…",
+            "Resampling to 16 kHz mono for model compatibility.",
         )
         result = subprocess.run(
             [ffmpeg_exe, "-y", "-i", src_path, "-ac", "1", "-ar", str(SAMPLE_RATE), out_path],
@@ -207,13 +202,8 @@ def load_audio_16k(uploaded_file, tracker):
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-500:]}")
+            raise RuntimeError(f"ffmpeg conversion error:\n{result.stderr[-500:]}")
 
-        tracker.show(
-            2,
-            "Loading the audio into memory…",
-            "Reading the converted sound samples so the model can use them.",
-        )
         speech_array, _ = librosa.load(out_path, sr=SAMPLE_RATE)
     finally:
         for p in (src_path, out_path):
@@ -224,19 +214,15 @@ def load_audio_16k(uploaded_file, tracker):
 
 
 def attach_progress_hooks(state):
-    """Real progress signals from inside the model's forward pass."""
     w2v = model.wav2vec2
     handles = [
-        # Acoustic feature extraction finished -> transformer layers start
         w2v.feature_projection.register_forward_hook(
             lambda m, a, o: state.update(stage="encoder")
         ),
-        # Prediction head is about to run -> all transformer layers are done
         model.lm_head.register_forward_pre_hook(
             lambda m, a: state.update(stage="head")
         ),
     ]
-    # Count each transformer layer as it actually completes
     for layer in w2v.encoder.layers:
         handles.append(
             layer.register_forward_hook(
@@ -250,16 +236,15 @@ def run_model(input_values, result):
     try:
         with torch.inference_mode():
             result["logits"] = model(input_values).logits
-    except Exception as e:  # surfaced to the main thread
+    except Exception as e:
         result["error"] = e
 
 
 def transcribe(speech, tracker):
-    """Transcribe audio; long recordings are split into 20s parts to save memory."""
     chunk = 20 * SAMPLE_RATE if len(speech) > 30 * SAMPLE_RATE else len(speech)
     pieces = [speech[i : i + chunk] for i in range(0, len(speech), chunk)]
     if len(pieces) > 1 and len(pieces[-1]) < SAMPLE_RATE:
-        pieces.pop()  # drop a tiny trailing sliver
+        pieces.pop()
 
     total_layers = len(model.wav2vec2.encoder.layers)
     texts = []
@@ -269,14 +254,13 @@ def transcribe(speech, tracker):
 
         tracker.show(
             3,
-            "Preparing the audio for the model…",
-            part + "Normalizing the volume and shaping the data into what the model expects.",
+            "Preparing audio features…",
+            part + "Normalizing sound levels.",
         )
         inputs = processor(
             piece, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
         )
 
-        # Run the model in a background thread so this page can report real progress
         state = {"stage": "features", "layer": 0}
         handles = attach_progress_hooks(state)
         result = {}
@@ -291,22 +275,21 @@ def transcribe(speech, tracker):
                     tracker.show(
                         4,
                         "Extracting acoustic features…",
-                        part + "Turning the raw sound wave into patterns the model can analyze.",
+                        part + "Analyzing pitch and phonetic shapes.",
                     )
                 elif stage == "encoder":
                     done = min(state["layer"], total_layers)
                     tracker.show(
                         4,
-                        "Analyzing the speech…",
-                        f"{part}Neural network layer {done} of {total_layers}. "
-                        "This is the most computation-heavy step.",
+                        "Analyzing speech frames…",
+                        f"{part}Layer {done} of {total_layers}.",
                         progress=done / total_layers,
                     )
                 else:
                     tracker.show(
                         5,
-                        "Predicting Nuer characters…",
-                        part + "Scoring every possible character for each moment of audio.",
+                        "Predicting characters…",
+                        part + "Evaluating Nuer vocabulary probability matrix.",
                     )
                 time.sleep(0.25)
         finally:
@@ -319,8 +302,8 @@ def transcribe(speech, tracker):
 
         tracker.show(
             6,
-            "Decoding predictions into text…",
-            part + "Last step: choosing the best character at each moment and joining them into words.",
+            "Decoding text…",
+            part + "Generating final output string.",
         )
         predicted_ids = torch.argmax(result["logits"], dim=-1)
         texts.append(processor.batch_decode(predicted_ids)[0].strip())
@@ -328,36 +311,348 @@ def transcribe(speech, tracker):
     return " ".join(t for t in texts if t)
 
 
-# ---------- Main UI ----------
-audio_file = st.file_uploader(
-    "Drop a recording here or browse",
-    type=["wav", "mp3", "m4a", "aac", "ogg"],
-)
+# ---------- Custom Live Visual Waveform Recorder Component ----------
+def render_waveform_recorder():
+    """HTML5 canvas live scrolling waveform studio component."""
+    html_code = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          background-color: #1a1c23;
+          color: #e0e0e0;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 10px;
+          border-radius: 16px;
+          border: 1px solid rgba(255,75,75,0.25);
+        }
+        .canvas-container {
+          position: relative;
+          width: 100%;
+          height: 160px;
+          background: #121318;
+          border-radius: 12px;
+          overflow: hidden;
+          border: 1px solid #2d2f39;
+        }
+        canvas {
+          width: 100%;
+          height: 100%;
+          display: block;
+        }
+        .time-ruler {
+          position: absolute;
+          top: 4px;
+          width: 100%;
+          display: flex;
+          justify-content: space-between;
+          padding: 0 15px;
+          font-family: monospace;
+          font-size: 11px;
+          color: #717585;
+          pointer-events: none;
+        }
+        .timeline-center-line {
+          position: absolute;
+          top: 50%;
+          left: 0;
+          width: 100%;
+          height: 1px;
+          background: rgba(255, 255, 255, 0.08);
+          pointer-events: none;
+        }
+        .playhead-line {
+          position: absolute;
+          top: 0;
+          left: 45%;
+          width: 2px;
+          height: 100%;
+          background: #ff4b4b;
+          box-shadow: 0 0 8px rgba(255, 75, 75, 0.8);
+          pointer-events: none;
+        }
+        .controls {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 24px;
+          margin-top: 14px;
+          width: 100%;
+        }
+        .btn {
+          width: 48px;
+          height: 48px;
+          border-radius: 50%;
+          border: none;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.2s ease;
+          outline: none;
+        }
+        .btn-rec {
+          background: #282a36;
+          border: 2px solid #ff4b4b;
+        }
+        .btn-rec:hover {
+          transform: scale(1.08);
+          box-shadow: 0 0 15px rgba(255, 75, 75, 0.4);
+        }
+        .rec-dot {
+          width: 16px;
+          height: 16px;
+          background: #ff4b4b;
+          border-radius: 50%;
+        }
+        .btn-stop {
+          background: #282a36;
+          border: 2px solid #ffffff;
+        }
+        .btn-stop:hover {
+          transform: scale(1.08);
+        }
+        .stop-square {
+          width: 14px;
+          height: 14px;
+          background: #ffffff;
+          border-radius: 3px;
+        }
+        .timer {
+          font-family: monospace;
+          font-size: 1.5rem;
+          font-weight: 700;
+          color: #ffffff;
+          letter-spacing: 1px;
+          min-width: 110px;
+          text-align: center;
+        }
+        .recording .rec-dot {
+          animation: pulse-dot 1s infinite alternate;
+        }
+        @keyframes pulse-dot {
+          from { transform: scale(0.9); opacity: 0.7; }
+          to { transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px #ff4b4b; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="canvas-container">
+        <div class="time-ruler">
+          <span>00:00.00</span>
+          <span>00:01.60</span>
+          <span>00:03.20</span>
+          <span>00:04.80</span>
+          <span>00:06.40</span>
+        </div>
+        <div class="timeline-center-line"></div>
+        <canvas id="waveform"></canvas>
+        <div class="playhead-line"></div>
+      </div>
 
-with st.expander("💡 Tips for best results"):
-    st.write(
-        "- Speak clearly and keep background noise low\n"
-        "- Hold the microphone close to the speaker\n"
-        "- Short clips (under 30 seconds) are the fastest\n"
-        "- Supported formats: WAV, MP3, M4A, AAC, OGG"
+      <div class="controls">
+        <button id="btnStop" class="btn btn-stop" style="opacity: 0.4; cursor: not-allowed;" disabled>
+          <div class="stop-square"></div>
+        </button>
+        <div id="timer" class="timer">00:00.00</div>
+        <button id="btnRec" class="btn btn-rec">
+          <div class="rec-dot"></div>
+        </button>
+      </div>
+
+      <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        let audioCtx, analyser, dataArray, source;
+        let isRecording = false;
+        let startTime;
+        let timerInterval;
+        let animFrame;
+
+        const canvas = document.getElementById('waveform');
+        const ctx = canvas.getContext('2d');
+        const timerEl = document.getElementById('timer');
+        const btnRec = document.getElementById('btnRec');
+        const btnStop = document.getElementById('btnStop');
+
+        let waveHistory = [];
+        const PLAYHEAD_X_RATIO = 0.45; // 45% mark from left
+
+        function resizeCanvas() {
+          canvas.width = canvas.offsetWidth;
+          canvas.height = canvas.offsetHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function drawWaveform() {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          const centerY = canvas.height / 2;
+          const playheadX = canvas.width * PLAYHEAD_X_RATIO;
+          const barWidth = 3;
+          const gap = 2;
+          const step = barWidth + gap;
+
+          if (isRecording && analyser) {
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              sum += dataArray[i];
+            }
+            let avg = sum / dataArray.length;
+            let normAmp = Math.min(1.0, Math.max(0.04, (avg / 128.0) * 1.5));
+            waveHistory.push(normAmp);
+          }
+
+          // Draw scrolling history bars
+          for (let i = 0; i < waveHistory.length; i++) {
+            let x = playheadX - (waveHistory.length - 1 - i) * step;
+            if (x < -10) continue; // Off screen left
+
+            let height = waveHistory[i] * (canvas.height * 0.7);
+            ctx.fillStyle = "#8a8d9b";
+            ctx.fillRect(x, centerY - height / 2, barWidth, height);
+          }
+
+          animFrame = requestAnimationFrame(drawWaveform);
+        }
+
+        function updateTimer() {
+          const now = Date.now();
+          const diff = new Date(now - startTime);
+          const mins = String(diff.getUTCMinutes()).padStart(2, '0');
+          const secs = String(diff.getUTCSeconds()).padStart(2, '0');
+          const ms = String(Math.floor(diff.getUTCMilliseconds() / 10)).padStart(2, '0');
+          timerEl.textContent = `${mins}:${secs}.${ms}`;
+        }
+
+        btnRec.addEventListener('click', async () => {
+          if (isRecording) return;
+
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 128;
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            source = audioCtx.createMediaStreamSource(stream);
+            source.connect(analyser);
+
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            waveHistory = [];
+
+            mediaRecorder.ondataavailable = (e) => {
+              if (e.data.size > 0) audioChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+              const blob = new Blob(audioChunks, { type: 'audio/wav' });
+              const reader = new FileReader();
+              reader.readAsDataURL(blob);
+              reader.onloadend = () => {
+                const base64Audio = reader.result;
+                window.parent.postMessage({
+                  type: "streamlit:setComponentValue",
+                  value: base64Audio
+                }, "*");
+              };
+              stream.getTracks().forEach(track => track.stop());
+            };
+
+            mediaRecorder.start(100);
+            isRecording = true;
+            startTime = Date.now();
+            timerInterval = setInterval(updateTimer, 30);
+
+            btnRec.classList.add('recording');
+            btnRec.style.opacity = '0.4';
+            btnRec.disabled = true;
+
+            btnStop.style.opacity = '1';
+            btnStop.disabled = false;
+            btnStop.style.cursor = 'pointer';
+
+            drawWaveform();
+
+          } catch (err) {
+            alert('Microphone access denied or not supported.');
+            console.error(err);
+          }
+        });
+
+        btnStop.addEventListener('click', () => {
+          if (!isRecording) return;
+          isRecording = false;
+          clearInterval(timerInterval);
+          cancelAnimationFrame(animFrame);
+          mediaRecorder.stop();
+
+          btnRec.classList.remove('recording');
+          btnRec.style.opacity = '1';
+          btnRec.disabled = false;
+
+          btnStop.style.opacity = '0.4';
+          btnStop.disabled = true;
+          btnStop.style.cursor = 'not-allowed';
+        });
+
+        // Initialize background canvas view
+        drawWaveform();
+      </script>
+    </body>
+    </html>
+    """
+    return components.html(html_code, height=255)
+
+
+# ---------- Main UI Layout ----------
+tab_record, tab_upload = st.tabs(["🎙️ Record Live Audio", "📁 Upload File"])
+
+audio_bytes = None
+file_key = None
+
+with tab_record:
+    st.caption("Click the red record button below to speak directly from your browser.")
+    recorded_audio_data = render_waveform_recorder()
+
+    # Retrieve base64 wav string from custom html component
+    if recorded_audio_data:
+        import base64
+        try:
+            header, encoded = recorded_audio_data.split(",", 1)
+            audio_bytes = base64.b64decode(encoded)
+            st.audio(audio_bytes, format="audio/wav")
+            file_key = f"live_recording_{len(audio_bytes)}"
+        except Exception as e:
+            st.error(f"Error parsing live recording: {e}")
+
+with tab_upload:
+    uploaded_file = st.file_uploader(
+        "Drop a recording here or browse",
+        type=["wav", "mp3", "m4a", "aac", "ogg"],
     )
+    if uploaded_file is not None:
+        audio_bytes = uploaded_file.read()
+        st.audio(audio_bytes)
+        file_key = f"{uploaded_file.name}-{len(audio_bytes)}"
 
-if audio_file is None:
-    st.markdown(
-        '<div class="hint">👆 Upload a Nuer recording to get started</div>',
-        unsafe_allow_html=True,
-    )
-else:
-    st.audio(audio_file)
-    file_key = f"{audio_file.name}-{audio_file.size}"
-
+# Transcribe action trigger
+if audio_bytes is not None and file_key is not None:
     if st.button("✨ Transcribe Audio", type="primary"):
         placeholder = st.empty()
         tracker = Tracker(placeholder)
         try:
-            speech = load_audio_16k(audio_file, tracker)
+            speech = load_audio_16k(audio_bytes, tracker)
             if len(speech) == 0:
-                raise RuntimeError("The audio file appears to be empty.")
+                raise RuntimeError("The audio recording appears to be empty.")
             text = transcribe(speech, tracker)
         except Exception as e:
             placeholder.empty()
@@ -372,11 +667,11 @@ else:
             "duration": len(speech) / SAMPLE_RATE,
         }
 
-    # Result is stored in session_state so it survives the download button's rerun
+    # Render results
     res = st.session_state.get("result")
     if res and res["key"] == file_key:
         if not res["text"]:
-            st.warning("No speech detected. Try a clearer or louder recording.")
+            st.warning("No speech detected. Try speaking louder or closer to the microphone.")
         else:
             safe_text = html.escape(res["text"])
             st.markdown(
@@ -397,6 +692,11 @@ else:
             with col2:
                 with st.expander("📋 Copy text"):
                     st.code(res["text"], language=None)
+else:
+    st.markdown(
+        '<div class="hint">👆 Record audio or upload a file above to begin</div>',
+        unsafe_allow_html=True,
+    )
 
 st.markdown(
     f'<div class="footer">Powered by Meta MMS · adapter: {ADAPTER_REPO}</div>',
