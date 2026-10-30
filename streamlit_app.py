@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 import imageio_ffmpeg
@@ -21,6 +22,8 @@ BASE_MODEL_ID = "facebook/mms-1b-all"
 ADAPTER_REPO = "buayism/nuer_mms_adapter"
 ADAPTER_FILE = "adapter.nus.safetensors"
 SAMPLE_RATE = 16000
+TOTAL_STEPS = 6
+BAR_DELAYS = [0, 0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1, 0]
 
 # ---------- Styling (same palette: dark bg, red #ff4b4b, green) ----------
 st.markdown(
@@ -68,15 +71,14 @@ div.stButton > button:hover, button[data-testid="stBaseButton-primary"]:hover {
 .loader {
   text-align:center; padding:1.4rem; background:#262730; border-radius:16px;
   border:1px solid rgba(255,75,75,.4); box-shadow: 0 0 24px rgba(255,75,75,.15);
-  animation: fadeUp .3s ease both;
 }
 .bars { display:flex; gap:5px; justify-content:center; align-items:center; height:50px; }
 .bars span { width:6px; height:8px; background:#ff4b4b; border-radius:3px; animation: bounce 1s ease-in-out infinite; }
-.bars span:nth-child(2){animation-delay:.1s} .bars span:nth-child(3){animation-delay:.2s}
-.bars span:nth-child(4){animation-delay:.3s} .bars span:nth-child(5){animation-delay:.4s}
-.bars span:nth-child(6){animation-delay:.3s} .bars span:nth-child(7){animation-delay:.2s}
-.bars span:nth-child(8){animation-delay:.1s} .bars span:nth-child(9){animation-delay:0s}
-.loader .msg { margin-top:.6rem; font-weight:600; }
+.loader .step-tag { margin-top:.7rem; font-size:.78rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:#ff4b4b; }
+.loader .msg { margin-top:.3rem; font-size:1.15rem; font-weight:700; }
+.loader .note { margin-top:.3rem; opacity:.8; font-size:.92rem; }
+.pbar { height:8px; border-radius:999px; background:rgba(255,255,255,.1); margin-top:.9rem; overflow:hidden; }
+.pfill { height:100%; background:#ff4b4b; border-radius:999px; box-shadow:0 0 12px rgba(255,75,75,.7); transition: width .25s ease; }
 
 .result {
   background: rgba(33,195,84,.1); border: 1px solid rgba(61,213,109,.5);
@@ -84,7 +86,17 @@ div.stButton > button:hover, button[data-testid="stBaseButton-primary"]:hover {
   box-shadow: 0 0 24px rgba(33,195,84,.15); animation: fadeUp .5s ease both;
 }
 .result .label { color:#3dd56d; font-size:.8rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
-.result .text { font-size: 1.6rem; font-weight: 700; line-height: 1.5; margin-top:.4rem; }
+.result .text {
+  font-family: "Times New Roman", Times, "Liberation Serif", serif;
+  font-size: 1.8rem; font-weight: 700; line-height: 1.5; margin-top:.4rem;
+}
+
+/* Copy box uses the same Times New Roman style */
+[data-testid="stCode"] pre, [data-testid="stCode"] code {
+  font-family: "Times New Roman", Times, "Liberation Serif", serif !important;
+  font-size: 1.15rem !important;
+  white-space: pre-wrap !important;
+}
 
 .hint { text-align:center; opacity:.65; padding: .8rem 0; }
 .footer { text-align:center; opacity:.5; font-size:.8rem; margin-top:2.5rem; }
@@ -136,17 +148,45 @@ with st.spinner("Warming up the Nuer model (the first load can take a minute)...
     processor, model = load_model()
 
 
-# ---------- Helpers ----------
-def loader_html(message):
+# ---------- Live, honest progress display ----------
+def loader_html(step, title, note, elapsed, progress=None):
+    # Negative delays keep the bar animation in phase when the card re-renders
+    phase = elapsed % 1.0
+    bars = "".join(
+        f'<span style="animation-delay:{d - phase:.2f}s"></span>' for d in BAR_DELAYS
+    )
+    pbar = ""
+    if progress is not None:
+        pbar = (
+            f'<div class="pbar"><div class="pfill" '
+            f'style="width:{progress * 100:.0f}%"></div></div>'
+        )
     return (
-        '<div class="loader"><div class="bars">'
-        + "<span></span>" * 9
-        + f'</div><div class="msg">{html.escape(message)}</div></div>'
+        f'<div class="loader"><div class="bars">{bars}</div>'
+        f'<div class="step-tag">Step {step} of {TOTAL_STEPS} · {elapsed:.0f}s elapsed</div>'
+        f'<div class="msg">{html.escape(title)}</div>'
+        f'<div class="note">{html.escape(note)}</div>{pbar}</div>'
     )
 
 
-def load_audio_16k(uploaded_file):
+class Tracker:
+    """Writes the current, real pipeline stage into one placeholder."""
+
+    def __init__(self, placeholder):
+        self.placeholder = placeholder
+        self.start = time.time()
+
+    def show(self, step, title, note, progress=None):
+        self.placeholder.markdown(
+            loader_html(step, title, note, time.time() - self.start, progress),
+            unsafe_allow_html=True,
+        )
+
+
+# ---------- Audio + model helpers ----------
+def load_audio_16k(uploaded_file, tracker):
     """Convert any uploaded audio to 16kHz mono WAV with ffmpeg, then load it."""
+    tracker.show(1, "Reading your audio file…", "Saving your upload so it can be processed.")
     suffix = os.path.splitext(uploaded_file.name)[1] or ".audio"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
         src.write(uploaded_file.getbuffer())
@@ -156,6 +196,11 @@ def load_audio_16k(uploaded_file):
     ffmpeg_exe = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
 
     try:
+        tracker.show(
+            2,
+            "Converting your audio…",
+            "Converting to 16 kHz mono, the format the model was trained to hear.",
+        )
         result = subprocess.run(
             [ffmpeg_exe, "-y", "-i", src_path, "-ac", "1", "-ar", str(SAMPLE_RATE), out_path],
             capture_output=True,
@@ -163,6 +208,12 @@ def load_audio_16k(uploaded_file):
         )
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-500:]}")
+
+        tracker.show(
+            2,
+            "Loading the audio into memory…",
+            "Reading the converted sound samples so the model can use them.",
+        )
         speech_array, _ = librosa.load(out_path, sr=SAMPLE_RATE)
     finally:
         for p in (src_path, out_path):
@@ -172,22 +223,106 @@ def load_audio_16k(uploaded_file):
     return speech_array
 
 
-def transcribe(speech, on_progress):
+def attach_progress_hooks(state):
+    """Real progress signals from inside the model's forward pass."""
+    w2v = model.wav2vec2
+    handles = [
+        # Acoustic feature extraction finished -> transformer layers start
+        w2v.feature_projection.register_forward_hook(
+            lambda m, a, o: state.update(stage="encoder")
+        ),
+        # Prediction head is about to run -> all transformer layers are done
+        model.lm_head.register_forward_pre_hook(
+            lambda m, a: state.update(stage="head")
+        ),
+    ]
+    # Count each transformer layer as it actually completes
+    for layer in w2v.encoder.layers:
+        handles.append(
+            layer.register_forward_hook(
+                lambda m, a, o: state.update(layer=state["layer"] + 1)
+            )
+        )
+    return handles
+
+
+def run_model(input_values, result):
+    try:
+        with torch.inference_mode():
+            result["logits"] = model(input_values).logits
+    except Exception as e:  # surfaced to the main thread
+        result["error"] = e
+
+
+def transcribe(speech, tracker):
     """Transcribe audio; long recordings are split into 20s parts to save memory."""
     chunk = 20 * SAMPLE_RATE if len(speech) > 30 * SAMPLE_RATE else len(speech)
     pieces = [speech[i : i + chunk] for i in range(0, len(speech), chunk)]
     if len(pieces) > 1 and len(pieces[-1]) < SAMPLE_RATE:
         pieces.pop()  # drop a tiny trailing sliver
 
+    total_layers = len(model.wav2vec2.encoder.layers)
     texts = []
+
     for idx, piece in enumerate(pieces, 1):
-        on_progress(idx, len(pieces))
+        part = f"Part {idx} of {len(pieces)} · " if len(pieces) > 1 else ""
+
+        tracker.show(
+            3,
+            "Preparing the audio for the model…",
+            part + "Normalizing the volume and shaping the data into what the model expects.",
+        )
         inputs = processor(
             piece, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
         )
-        with torch.inference_mode():
-            logits = model(inputs.input_values).logits
-        predicted_ids = torch.argmax(logits, dim=-1)
+
+        # Run the model in a background thread so this page can report real progress
+        state = {"stage": "features", "layer": 0}
+        handles = attach_progress_hooks(state)
+        result = {}
+        thread = threading.Thread(
+            target=run_model, args=(inputs.input_values, result), daemon=True
+        )
+        thread.start()
+        try:
+            while thread.is_alive():
+                stage = state["stage"]
+                if stage == "features":
+                    tracker.show(
+                        4,
+                        "Extracting acoustic features…",
+                        part + "Turning the raw sound wave into patterns the model can analyze.",
+                    )
+                elif stage == "encoder":
+                    done = min(state["layer"], total_layers)
+                    tracker.show(
+                        4,
+                        "Analyzing the speech…",
+                        f"{part}Neural network layer {done} of {total_layers}. "
+                        "This is the most computation-heavy step.",
+                        progress=done / total_layers,
+                    )
+                else:
+                    tracker.show(
+                        5,
+                        "Predicting Nuer characters…",
+                        part + "Scoring every possible character for each moment of audio.",
+                    )
+                time.sleep(0.25)
+        finally:
+            thread.join()
+            for h in handles:
+                h.remove()
+
+        if "error" in result:
+            raise result["error"]
+
+        tracker.show(
+            6,
+            "Decoding predictions into text…",
+            part + "Last step: choosing the best character at each moment and joining them into words.",
+        )
+        predicted_ids = torch.argmax(result["logits"], dim=-1)
         texts.append(processor.batch_decode(predicted_ids)[0].strip())
 
     return " ".join(t for t in texts if t)
@@ -217,35 +352,23 @@ else:
     file_key = f"{audio_file.name}-{audio_file.size}"
 
     if st.button("✨ Transcribe Audio", type="primary"):
-        loader = st.empty()
-        start = time.time()
+        placeholder = st.empty()
+        tracker = Tracker(placeholder)
         try:
-            loader.markdown(
-                loader_html("Preparing your audio…"), unsafe_allow_html=True
-            )
-            speech = load_audio_16k(audio_file)
+            speech = load_audio_16k(audio_file, tracker)
             if len(speech) == 0:
                 raise RuntimeError("The audio file appears to be empty.")
-
-            def show_progress(i, n):
-                msg = (
-                    "Listening to your recording…"
-                    if n == 1
-                    else f"Listening… part {i} of {n}"
-                )
-                loader.markdown(loader_html(msg), unsafe_allow_html=True)
-
-            text = transcribe(speech, show_progress)
+            text = transcribe(speech, tracker)
         except Exception as e:
-            loader.empty()
+            placeholder.empty()
             st.error(f"Something went wrong: {e}")
             st.stop()
 
-        loader.empty()
+        placeholder.empty()
         st.session_state["result"] = {
             "key": file_key,
             "text": text,
-            "seconds": time.time() - start,
+            "seconds": time.time() - tracker.start,
             "duration": len(speech) / SAMPLE_RATE,
         }
 
