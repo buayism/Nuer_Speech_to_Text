@@ -1,7 +1,7 @@
 import librosa
 import streamlit as st
 import torch
-from transformers import AutoModelForCTC, AutoProcessor
+from transformers import AutoProcessor, Wav2Vec2ForCTC
 
 # App Configuration & Title
 st.set_page_config(page_title="Nuer MMS Speech-to-Text", page_icon="🎙️")
@@ -13,18 +13,30 @@ st.write(
 )
 
 
-# Load model and processor with caching so it only loads once
+# Load base model and adapter with caching so it only loads once
 @st.cache_resource
 def load_model():
-  model_id = "buayism/nuer_mms_adapter"
-  processor = AutoProcessor.from_pretrained(model_id)
-  model = AutoModelForCTC.from_pretrained(model_id)
+  # 1. Use the official base MMS model architecture
+  base_model_id = (
+      "facebook/mms-1b-all"  # or "facebook/mms-300m" depending on what you trained
+  )
+  adapter_repo = "buayism/nuer_mms_adapter"
+
+  st.info("Loading base MMS model and processor...")
+  processor = AutoProcessor.from_pretrained(adapter_repo)
+  model = Wav2Vec2ForCTC.from_pretrained(base_model_id)
+
+  # 2. Load your custom Nuer adapter weights from your Hugging Face repo
+  st.info("Loading Nuer adapter weights...")
+  model.load_adapter(adapter_repo)
+
+  # 3. Set the active adapter language/token
+  model.active_adapter = "nus"
+
   return processor, model
 
 
-with st.spinner(
-    "Loading Nuer MMS model and adapter from Hugging Face... Please wait."
-):
+with st.spinner("Initializing Nuer Speech-to-Text pipeline... Please wait."):
   processor, model = load_model()
 
 # File uploader for audio files
