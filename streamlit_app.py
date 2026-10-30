@@ -26,7 +26,7 @@ SAMPLE_RATE = 16000
 TOTAL_STEPS = 6
 BAR_DELAYS = [0, 0.1, 0.2, 0.3, 0.4, 0.3, 0.2, 0.1, 0]
 
-# ---------- Styling ----------
+# ---------- Styling (Enlarged Audio Input & Clean UI) ----------
 st.markdown(
     """
 <style>
@@ -51,6 +51,27 @@ st.markdown(
 .steps { display:flex; gap:.6rem; justify-content:center; flex-wrap:wrap; margin: .5rem 0 1.2rem; animation: fadeUp .8s ease both; }
 .step { padding:.35rem .85rem; border-radius:999px; background:#262730; font-size:.82rem; border:1px solid rgba(255,75,75,.35); }
 .step b { color:#ff4b4b; margin-right:.3rem; }
+
+/* --- ENLARGE STREAMLIT NATIVE AUDIO INPUT CONTROLS --- */
+[data-testid="stAudioInput"] {
+    background-color: #1e1f29;
+    border: 2px solid rgba(255, 75, 75, 0.4);
+    border-radius: 16px;
+    padding: 1rem;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+/* Increase record/play buttons and icons inside audio input */
+[data-testid="stAudioInput"] button {
+    transform: scale(1.4);
+    margin: 0.4rem 0.6rem;
+}
+/* Enlarge timer text and waveform visuals */
+[data-testid="stAudioInput"] svg {
+    transform: scale(1.2);
+}
+[data-testid="stAudioInput"] span, [data-testid="stAudioInput"] div {
+    font-size: 1.1rem !important;
+}
 
 [data-testid="stFileUploader"] section {
   border: 2px dashed rgba(255,75,75,.55); border-radius: 16px; background: #262730;
@@ -356,7 +377,7 @@ if audio_bytes is not None and file_key is not None:
             "duration": len(speech) / SAMPLE_RATE,
         }
 
-    # Render results
+    # Render results & clear option
     res = st.session_state.get("result")
     if res and res["key"] == file_key:
         if not res["text"]:
@@ -371,16 +392,24 @@ if audio_bytes is not None and file_key is not None:
             st.caption(
                 f"Audio length {res['duration']:.1f}s · transcribed in {res['seconds']:.1f}s"
             )
-            col1, col2 = st.columns(2)
-            with col1:
+            
+            col_dl, col_copy = st.columns(2)
+            with col_dl:
                 st.download_button(
                     "⬇️ Download as .txt",
                     res["text"],
                     file_name="nuer_transcription.txt",
                 )
-            with col2:
+            with col_copy:
                 with st.expander("📋 Copy text"):
                     st.code(res["text"], language=None)
+
+            # Clear / Reset Button to record another audio immediately
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄 Record New Audio / Clear Screen"):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
 else:
     st.markdown(
         '<div class="hint">👆 Record audio or upload a file above to begin</div>',
