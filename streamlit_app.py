@@ -481,7 +481,7 @@ def render_waveform_recorder():
         const btnStop = document.getElementById('btnStop');
 
         let waveHistory = [];
-        const PLAYHEAD_X_RATIO = 0.45; // 45% mark from left
+        const PLAYHEAD_X_RATIO = 0.45;
 
         function resizeCanvas() {
           canvas.width = canvas.offsetWidth;
@@ -510,10 +510,9 @@ def render_waveform_recorder():
             waveHistory.push(normAmp);
           }
 
-          // Draw scrolling history bars
           for (let i = 0; i < waveHistory.length; i++) {
             let x = playheadX - (waveHistory.length - 1 - i) * step;
-            if (x < -10) continue; // Off screen left
+            if (x < -10) continue;
 
             let height = waveHistory[i] * (canvas.height * 0.7);
             ctx.fillStyle = "#8a8d9b";
@@ -604,7 +603,6 @@ def render_waveform_recorder():
           btnStop.style.cursor = 'not-allowed';
         });
 
-        // Initialize background canvas view
         drawWaveform();
       </script>
     </body>
@@ -623,8 +621,8 @@ with tab_record:
     st.caption("Click the red record button below to speak directly from your browser.")
     recorded_audio_data = render_waveform_recorder()
 
-    # Retrieve base64 wav string from custom html component
-    if recorded_audio_data:
+    # Safely parse component output only if it's a valid string containing data
+    if isinstance(recorded_audio_data, str) and "," in recorded_audio_data:
         import base64
         try:
             header, encoded = recorded_audio_data.split(",", 1)
