@@ -7,3 +7,4 @@ accelerate
 soundfile
 huggingface_hub
 imageio-ffmpeg
+safetensors
