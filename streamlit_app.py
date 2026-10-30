@@ -1,6 +1,9 @@
 import os
+import shutil
+import subprocess
 import tempfile
 
+import imageio_ffmpeg
 import librosa
 import streamlit as st
 import torch
@@ -25,10 +28,8 @@ ADAPTER_FILE = "adapter.nus.safetensors"
 # Load base model and adapter with caching so it only loads once
 @st.cache_resource
 def load_model():
-    # 1. Processor/tokenizer with your Nuer vocab
     processor = AutoProcessor.from_pretrained(ADAPTER_REPO)
 
-    # 2. Base MMS model, resized to your Nuer vocab size
     model = Wav2Vec2ForCTC.from_pretrained(
         BASE_MODEL_ID,
         vocab_size=len(processor.tokenizer),
@@ -36,7 +37,6 @@ def load_model():
         ignore_mismatched_sizes=True,
     )
 
-    # 3. Load your trained adapter layers + lm_head from your HF repo
     adapter_path = hf_hub_download(ADAPTER_REPO, ADAPTER_FILE)
     state_dict = load_file(adapter_path)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -44,6 +44,34 @@ def load_model():
 
     model.eval()
     return processor, model
+
+
+def load_audio_16k(uploaded_file):
+    """Convert any uploaded audio to 16kHz mono WAV with ffmpeg, then load it."""
+    suffix = os.path.splitext(uploaded_file.name)[1] or ".audio"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as src:
+        src.write(uploaded_file.getbuffer())
+        src_path = src.name
+    out_path = src_path + "_16k.wav"
+
+    # Prefer system ffmpeg (packages.txt), fall back to the bundled binary
+    ffmpeg_exe = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
+
+    try:
+        result = subprocess.run(
+            [ffmpeg_exe, "-y", "-i", src_path, "-ac", "1", "-ar", "16000", out_path],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-1000:]}")
+        speech_array, _ = librosa.load(out_path, sr=16000)
+    finally:
+        for p in (src_path, out_path):
+            if os.path.exists(p):
+                os.remove(p)
+
+    return speech_array
 
 
 with st.spinner("Initializing Nuer Speech-to-Text pipeline... Please wait."):
@@ -59,30 +87,21 @@ if audio_file is not None:
 
     if st.button("Transcribe Audio", type="primary"):
         with st.spinner("Processing speech-to-text transcription..."):
-            # Save the upload temporarily, keeping its real file extension
-            suffix = os.path.splitext(audio_file.name)[1] or ".wav"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(audio_file.getbuffer())
-                audio_path = tmp.name
-
             try:
-                # Load and resample audio to 16kHz (required by MMS model)
-                speech_array, _ = librosa.load(audio_path, sr=16000)
-            finally:
-                os.remove(audio_path)
+                speech_array = load_audio_16k(audio_file)
+            except Exception as e:
+                st.error(f"Could not read this audio file: {e}")
+                st.stop()
 
-            # Prepare model inputs
             inputs = processor(
                 speech_array, sampling_rate=16000, return_tensors="pt", padding=True
             )
 
-            # Run inference without gradient calculations
             with torch.no_grad():
                 logits = model(inputs.input_values).logits
 
             predicted_ids = torch.argmax(logits, dim=-1)
             transcription = processor.batch_decode(predicted_ids)[0]
 
-            # Display the final transcription
             st.success("Transcription Complete:")
             st.markdown(f"### {transcription}")
