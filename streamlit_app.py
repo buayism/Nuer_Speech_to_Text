@@ -13,7 +13,12 @@ import streamlit as st
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
-from transformers import AutoProcessor, Wav2Vec2ForCTC
+from transformers import AutoModelForCTC, AutoProcessor, Wav2Vec2ForCTC
+
+try:
+    from peft import PeftModel
+except ImportError:
+    PeftModel = None
 
 st.set_page_config(
     page_title="Nuer MMS Speech-to-Text", page_icon="🎙️", layout="centered"
@@ -132,7 +137,7 @@ st.markdown(
 <div class="hero">
 <div class="mic">🎙️</div>
 <div class="title">Nuer Speech-to-Text</div>
-<div class="sub">Turn spoken Nuer into text, powered by your fine-tuned MMS adapter.</div>
+<div class="sub">Turn spoken Nuer into text.</div>
 </div>
 <div class="steps">
 <div class="step"><b>1</b> Record or Upload</div>
@@ -145,18 +150,42 @@ st.markdown(
 
 
 # ---------- Model Loading ----------
-@st.cache_resource
-def load_model():
-    processor = AutoProcessor.from_pretrained(ADAPTER_REPO)
+# Retrieve Hugging Face token from Streamlit secrets (with fallback to environment variables)
+hf_token = None
+try:
+    if "HF_TOKEN" in st.secrets:
+        hf_token = st.secrets["HF_TOKEN"]
+except Exception:
+    # Occurs if secrets are not configured or initialized locally
+    pass
 
-    model = Wav2Vec2ForCTC.from_pretrained(
+if not hf_token:
+    hf_token = os.environ.get("HF_TOKEN")
+
+
+@st.cache_resource(show_spinner=False)
+def load_model(token: str | None = None):
+    # Load processor with token authentication
+    processor = AutoProcessor.from_pretrained(
+        ADAPTER_REPO,
+        token=token,
+    )
+
+    # Load AutoModelForCTC base model with token authentication
+    model = AutoModelForCTC.from_pretrained(
         BASE_MODEL_ID,
         vocab_size=len(processor.tokenizer),
         pad_token_id=processor.tokenizer.pad_token_id,
         ignore_mismatched_sizes=True,
+        token=token,
     )
 
-    adapter_path = hf_hub_download(ADAPTER_REPO, ADAPTER_FILE)
+    # Download adapter weights using private repository token
+    adapter_path = hf_hub_download(
+        repo_id=ADAPTER_REPO,
+        filename=ADAPTER_FILE,
+        token=token,
+    )
     state_dict = load_file(adapter_path)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
@@ -164,8 +193,39 @@ def load_model():
     return processor, model
 
 
-with st.spinner("Warming up the Nuer model..."):
-    processor, model = load_model()
+# Fallback warning if token is missing
+if not hf_token:
+    st.warning(
+        "⚠️ **Hugging Face token (`HF_TOKEN`) not detected in Streamlit secrets.**\n\n"
+        "If your adapter repository is private, loading will fail. "
+        "Please add `HF_TOKEN = \"your_token\"` to your Streamlit secrets."
+    )
+
+try:
+    with st.spinner("Warming up the Nuer model..."):
+        processor, model = load_model(token=hf_token)
+except Exception as e:
+    err_str = str(e)
+    if any(keyword in err_str.lower() for keyword in ["401", "403", "unauthorized", "gated", "restricted", "token", "not found"]):
+        st.error(
+            "🔒 **Hugging Face Authentication / Access Error**: Unable to access the adapter repository "
+            f"`{ADAPTER_REPO}`.\n\n"
+            "The repository is private or the provided token is unauthorized or missing. "
+            "Please make sure `HF_TOKEN` in your Streamlit secrets is valid and has read access."
+        )
+    else:
+        st.error(f"⚠️ **Error loading model**: {err_str}")
+
+    st.info(
+        "💡 **How to configure your token in Streamlit Cloud:**\n"
+        "1. Open your app on [share.streamlit.io](https://share.streamlit.io).\n"
+        "2. Click **Settings** (⋮) → **Secrets**.\n"
+        "3. Add your Hugging Face Access Token:\n"
+        "```toml\n"
+        'HF_TOKEN = "hf_your_token_here"\n'
+        "```"
+    )
+    st.stop()
 
 
 # ---------- Audio & Model Processing ----------
