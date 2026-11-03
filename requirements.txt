@@ -1,9 +1,9 @@
 streamlit
-torch==2.1.2
-torchaudio==2.1.2
-transformers==4.38.2
+torch
+torchaudio
+transformers
 librosa
-accelerate==0.27.2
+accelerate
 soundfile
 huggingface_hub
 imageio-ffmpeg
