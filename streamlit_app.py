@@ -165,6 +165,7 @@ if not hf_token:
 
 @st.cache_resource(show_spinner=False)
 @st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_model(token: str | None = None):
     # Load processor directly from the adapter repo
     processor = AutoProcessor.from_pretrained(
@@ -172,9 +173,10 @@ def load_model(token: str | None = None):
         token=token,
     )
 
-    # Load base model
+    # Load base model with the correct vocab size matching the tokenizer & adapter
     model = AutoModelForCTC.from_pretrained(
         BASE_MODEL_ID,
+        vocab_size=len(processor.tokenizer),
         pad_token_id=processor.tokenizer.pad_token_id,
         ignore_mismatched_sizes=True,
         token=token,
@@ -188,12 +190,10 @@ def load_model(token: str | None = None):
     )
     state_dict = load_file(adapter_path)
     
-    # Load state dict directly without manual embedding resizing
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     model.eval()
     return processor, model
-
 
 # Fallback warning if token is missing
 if not hf_token:
