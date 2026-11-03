@@ -165,16 +165,15 @@ if not hf_token:
 
 @st.cache_resource(show_spinner=False)
 def load_model(token: str | None = None):
-    # Load processor with token authentication
+    # Load processor directly from the adapter repo
     processor = AutoProcessor.from_pretrained(
         ADAPTER_REPO,
         token=token,
     )
 
-    # Load AutoModelForCTC base model with token authentication
+    # Load base model without forcing external vocab size conflicts
     model = AutoModelForCTC.from_pretrained(
         BASE_MODEL_ID,
-        vocab_size=len(processor.tokenizer),
         pad_token_id=processor.tokenizer.pad_token_id,
         ignore_mismatched_sizes=True,
         token=token,
@@ -187,6 +186,10 @@ def load_model(token: str | None = None):
         token=token,
     )
     state_dict = load_file(adapter_path)
+    
+    # Safely resize model token embeddings to match adapter vocab size
+    model.resize_token_embeddings(len(processor.tokenizer))
+
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     model.eval()
