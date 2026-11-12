@@ -1,0 +1,31 @@
+name: Keep Streamlit app awake
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Validate app URL
+        env:
+          APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          if [ -z "$APP_URL" ]; then
+            echo "Set the repository Actions variable STREAMLIT_APP_URL to your deployed Streamlit app URL."
+            exit 1
+          fi
+
+      - name: Request the Streamlit app
+        env:
+          APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --max-time 90 --retry 2 --retry-delay 30 \
+            --output /dev/null "$APP_URL"
